@@ -18,19 +18,19 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define BLOCK_SIZE      512 /* bytes */
-#define FILENAME_SIZE   64
-#define FILE_BLOCKS     110
-#define N_OF_INODES     123
-#define MODE            "r+"
-#define MAGIC_1         0x9aa9aa9a
-#define MAGIC_2         0x6d5fa7c3
-#define MAGIC_INODE     0xf9fe9eef
-#define FREE_LIST_HEAD  4
-#define FIRST_FD_INDEX  5
-#define BLOCK_CNT_INDEX 3
-#define MAGIC_1_INDEX   0
-#define MAGIC_2_INDEX   1
+#define BLOCK_SIZE          512 /* bytes */
+#define FILENAME_SIZE       64
+#define FILE_BLOCKS         110
+#define N_OF_INODES         123
+#define MODE                "r+"
+#define MAGIC_1             0x9aa9aa9a
+#define MAGIC_2             0x6d5fa7c3
+#define MAGIC_INODE         0xf9fe9eef
+#define FREE_LIST_HEAD      4
+#define FIRST_FD_INDEX      5
+#define BLOCK_CNT_INDEX     3
+#define MAGIC_1_INDEX       0
+#define MAGIC_2_INDEX       1
 
 /* static char *disk_file_name; */
 static FILE *disk;
@@ -42,7 +42,7 @@ typedef struct fhandle {
     int *inode;
 } fhandle;
 
-typedef struct inode {
+typedef struct inode_t {
     int magic;
     char filename[FILENAME_SIZE];
     int size;
@@ -67,6 +67,27 @@ static int fsck()
     }
     
     return 0;
+}
+
+static int get_first_free_inode_index()
+{
+    int nmemb = BLOCK_SIZE / sizeof(int);
+    int i;
+    for (i = 5; i < nmemb; i++)
+    {
+        if (zero_block[i] == -1)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void new_inode_block_zero(int pos, int inode_desc)
+{
+    zero_block[pos] = inode_desc;
+    lseek(fd_disk, (pos * sizeof(int)), SEEK_SET);
+    fwrite(&inode_desc, sizeof(int), 1, disk);
 }
 
 static void update_first_free(int free_head)
@@ -122,7 +143,19 @@ static int *inode_for_path(const char *path)
 static int sofs_mknod(const char *path, mode_t mode, dev_t rdev)
 {
     printf("Entered mknod with path %s\n", path);
-    /* TODO stub */
+    int flh = zero_block[FREE_LIST_HEAD];
+    int *block = read_block(flh);
+    update_first_free(block[0]);
+    free(block);
+    /* create an inode */
+    inode_t inode; //= malloc(nmemb * sizeof(int));
+    memset(&inode, -1, sizeof(inode));
+    inode.magic = MAGIC_INODE;
+    strcpy(inode.filename, path);
+    write_block_to_disk(flh, (int *) &inode);
+    /* update zero_block */
+    int pos = get_first_free_inode_index();
+    new_inode_block_zero(pos, flh);
     return 0;
 }
 
@@ -179,12 +212,14 @@ static int sofs_getattr(const char *path, struct stat *stbuf)
         inode_t *inode = (inode_t *) inode_for_path(path);
         if (inode != NULL)
         {
+            printf("getattr found!\n");
             stbuf -> st_size = inode -> size;
             stbuf -> st_nlink = 1;
             free(inode);
         }
         else
         {
+            printf("getattr not found!\n");
             res = -ENOENT;
         }
     }

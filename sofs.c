@@ -109,14 +109,6 @@ static void write_block(int index, int *block)
     fwrite(block, sizeof(int), BLOCK_SIZE / sizeof(int), disk);
 }
 
-static void update_first_free(int free_head)
-{
-    zero_block[4] = free_head; /* zero_block[4] is free list head */
-    fseek(disk, (FREE_LIST_HEAD * sizeof(int)), SEEK_SET); /* go to zero_block[4] on the (disk) file */
-    fwrite(&free_head, sizeof(int), 1, disk); /* write the new value, using a pointer to the argument as 'buffer' */
-    //print_zero_block();
-}
-
 static int *read_block(int block_index)
 {
     int *block = (int *) malloc(BLOCK_SIZE); /* must be free'd somewhere by a caller */
@@ -129,6 +121,26 @@ static int *read_block(int block_index)
     }
     printf("Returning block!\n");
     return block;
+}
+
+static void update_first_free(int free_head)
+{
+    zero_block[4] = free_head; /* zero_block[4] is free list head */
+    fseek(disk, (FREE_LIST_HEAD * sizeof(int)), SEEK_SET); /* go to zero_block[4] on the (disk) file */
+    fwrite(&free_head, sizeof(int), 1, disk); /* write the new value, using a pointer to the argument as 'buffer' */
+    //print_zero_block();
+}
+
+static int get_and_update_first_free()
+{
+    int res = zero_block[4];
+    int *current_free = read_block(res);
+    int next = current_free[0];
+    free(current_free);
+    zero_block[4] = next;
+    fseek(disk, (FREE_LIST_HEAD * sizeof(int)), SEEK_SET);
+    fwrite(&next, sizeof(int), 1, disk);
+    return res;
 }
 
 static inode_t *inode_for_path(const char *path)
@@ -280,32 +292,47 @@ static int sofs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
 
 static int sofs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
-    printf("Called read\n");
-    char *rd = (char *) read_block(3);
+    printf("Called read with size = %zu and offset = %lld\n", size, offset);
+    char *rd = (char *) read_block(2);
     memcpy(buf, rd, size);
-    printf("out contains: %s\n", buf);
+    printf("at sofs_read, content of buffer: %s\n", buf);
     free(rd);
-	return size;
+    return size;
+}
+
+static int sofs_truncate(const char* path, off_t size)
+{
+    /* TODO stub */
+    return 0;
 }
 
 static int sofs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
     printf("Called write\n");
     handle_t *handle = (handle_t *) fi -> fh;
-    char new_block[BLOCK_SIZE];
-    memset(new_block, 0, BLOCK_SIZE);
-    memcpy(new_block, buf, size);
-    printf("new_block contains: %s\n", new_block);
-    write_block(3, (int *) new_block);
+    int block_i = offset / BLOCK_SIZE;
+    int offset_in_block = offset - block_i * BLOCK_SIZE;
+    int *fileblocks = (handle -> inode) -> fileblocks;
+    char *block_buffer;
+    int disk_block = fileblocks[18 + block_i];
+    if (disk_block != -1)
+    {
+        block_buffer = (char *) read_block(disk_block);
+    }
+    else
+    {
+        disk_block = get_and_update_first_free();
+        block_buffer = malloc(BLOCK_SIZE);
+        memset(block_buffer, 0, BLOCK_SIZE);
+    }
+    memcpy(block_buffer + offset_in_block, buf, size);
+    printf("WILL WRITE IN BLOCK %d\n", disk_block);
+    write_block(disk_block, (int *) block_buffer);
+    free(block_buffer);
+    (handle -> inode) -> size = size;
+    write_block(handle -> inode_index, (int *) handle -> inode);
     return size;
 }
-
-/*
-static void *sofs_init(struct fuse_conn_info *conn)
-{
-    return NULL;
-}
-*/
 
 static void sofs_destroy(void *private_data)
 {
@@ -318,6 +345,7 @@ static struct fuse_operations sofs_oper = {
     .open       = sofs_open,
     .release    = sofs_release,
     .read       = sofs_read,
+    .truncate   = sofs_truncate,
     .write      = sofs_write,
     .create     = sofs_create,
     .destroy    = sofs_destroy,

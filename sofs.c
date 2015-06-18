@@ -43,6 +43,12 @@ typedef struct inode_t {
     int     fileblocks[110];
 } inode_t;
 
+typedef struct handle_t {
+    inode_t *inode;
+    int     inode_index;
+} handle_t;
+
+/*
 static void print_zero_block()
 {
     int buf_zero_block[128];
@@ -54,6 +60,7 @@ static void print_zero_block()
         printf("zero_block[%d] = %d\n", i, buf_zero_block[i]);
     }
 }
+*/
 
 static int fsck()
 {
@@ -94,7 +101,6 @@ static void new_inode_block_zero(int pos, int inode_desc)
     zero_block[pos] = inode_desc;
     fseek(disk, (pos * sizeof(int)), SEEK_SET);
     fwrite(&inode_desc, sizeof(int), 1, disk);
-    print_zero_block();
 }
 
 static void write_block(int index, int *block)
@@ -142,10 +148,43 @@ static inode_t *inode_for_path(const char *path)
                 printf("inode's magic not correct. inconsistent fs\n");
                 exit(-1);
             }
-            printf("inode's filename %s at desc %d\n", inode->filename, desc);
+            printf("inode's filename %s at desc %d\n", inode -> filename, desc);
             if (!strcmp(inode -> filename, path))
             {
+                printf("Returning inode at inode_for_path\n");
                 return inode;
+            }
+            free(inode);
+        }
+    }
+    return NULL; /* return value for nonexistent file */
+}
+
+static handle_t *handle_for_path(const char *path)
+{
+    int nmemb = BLOCK_SIZE / sizeof(int);
+    int desc;
+    int i;
+    inode_t *inode;
+    handle_t *handle;
+    for (i = 5; i < nmemb; i++)
+    {
+        desc = zero_block[i];
+        if (desc != -1)
+        {
+            inode = (inode_t *) read_block(desc);
+            if (inode -> magic != MAGIC_INODE)
+            {
+                printf("inode's magic not correct. inconsistent fs\n");
+                exit(-1);
+            }
+            printf("inode's filename %s at desc %d\n", inode -> filename, desc);
+            if (!strcmp(inode -> filename, path))
+            {
+                handle = (handle_t *) malloc(sizeof(handle_t));
+                handle -> inode = inode;
+                handle -> inode_index = desc;
+                return handle;
             }
             free(inode);
         }
@@ -155,9 +194,9 @@ static inode_t *inode_for_path(const char *path)
 
 static int sofs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
+    printf("Called create with path %s\n", path);
     int flh = zero_block[FREE_LIST_HEAD];
     int *block = read_block(flh);
-    printf("free head's fst position has %d\n", block[0]);
     update_first_free(block[0]);
     free(block);
     /* create an inode */
@@ -169,26 +208,32 @@ static int sofs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     write_block(flh, (int *) inode);
     /* update zero_block */
     new_inode_block_zero(get_first_free_inode_index(), flh);
-    fi -> fh = (uint64_t) inode;
+    handle_t *handle = malloc(sizeof(handle_t));
+    handle -> inode = inode;
+    handle -> inode_index = flh;
+    fi -> fh = (uint64_t) handle;
     return 0;
 }
 
 static int sofs_open(const char *path, struct fuse_file_info *fi)
 {
     printf("Called open of path \"%s\" flags %d \n", path, fi->flags);
-    inode_t *inode = inode_for_path(path);
-    if (inode == NULL) /* if the file doesn't exist, create it */
+    handle_t *handle = handle_for_path(path);
+    if (handle == NULL) /* if the file doesn't exist, create it */
     {
+        printf("sofs_open returned -ENOENT\n");
         return -ENOENT;
     }
-    fi -> fh = (uint64_t) inode;
+    fi -> fh = (uint64_t) handle;
     return 0;
 }
 
 static int sofs_release(const char *path, struct fuse_file_info *fi)
 {
     printf("Called release with path \"%s\"\n", path);
-    free((int *) fi -> fh);
+    handle_t *hand = (handle_t *) fi -> fh;
+    free(hand -> inode);
+    free(hand);
     return 0;
 }
 
@@ -236,19 +281,23 @@ static int sofs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
 static int sofs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
     printf("Called read\n");
-	/* TODO stub */
-	return 0;
+    char *rd = (char *) read_block(3);
+    memcpy(buf, rd, size);
+    printf("out contains: %s\n", buf);
+    free(rd);
+	return size;
 }
 
 static int sofs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
     printf("Called write\n");
-    inode_t *inode = (inode_t *) fi -> fh;
-    if (inode != NULL)
-    {
-        printf("Estamos no bom caminho\n");
-    }
-    return 1;
+    handle_t *handle = (handle_t *) fi -> fh;
+    char new_block[BLOCK_SIZE];
+    memset(new_block, 0, BLOCK_SIZE);
+    memcpy(new_block, buf, size);
+    printf("new_block contains: %s\n", new_block);
+    write_block(3, (int *) new_block);
+    return size;
 }
 
 /*
@@ -270,9 +319,7 @@ static struct fuse_operations sofs_oper = {
     .release    = sofs_release,
     .read       = sofs_read,
     .write      = sofs_write,
-    //.mknod      = sofs_mknod,
     .create     = sofs_create,
-    //.init       = sofs_init,
     .destroy    = sofs_destroy,
 };
 
@@ -309,9 +356,5 @@ int main(int argc, char *argv[])
         return -1;
     }
     
-    printf("Welcome. Mounting. Oh, btw, sizeof(inode_t) = %lu\n", sizeof(inode_t));
-    
-    print_zero_block();
-
 	return fuse_main(fuse_main_argc, fuse_main_argv, &sofs_oper, NULL);
 }

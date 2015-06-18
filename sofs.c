@@ -97,6 +97,12 @@ static void new_inode_block_zero(int pos, int inode_desc)
     print_zero_block();
 }
 
+static void write_block(int index, int *block)
+{
+    fseek(disk, index * BLOCK_SIZE, SEEK_SET);
+    fwrite(block, sizeof(int), BLOCK_SIZE / sizeof(int), disk);
+}
+
 static void update_first_free(int free_head)
 {
     zero_block[4] = free_head; /* zero_block[4] is free list head */
@@ -160,19 +166,10 @@ static int sofs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     inode -> magic = MAGIC_INODE;
     inode -> size = 0;
     strcpy(inode -> filename, path);
-    fseek(disk, 512, SEEK_SET);
-    fwrite(inode, sizeof(int), BLOCK_SIZE / sizeof(int), disk);
+    write_block(flh, (int *) inode);
     /* update zero_block */
-    int pos = get_first_free_inode_index();
-    new_inode_block_zero(pos, flh);
+    new_inode_block_zero(get_first_free_inode_index(), flh);
     fi -> fh = (uint64_t) inode;
-    
-    /////////
-    // int tempbuf[128];
-//     fseek(disk, 512, SEEK_SET);
-//     fread(tempbuf, 4, 128, disk);
-//     printf("magic checks? %d\n", tempbuf[0] == MAGIC_INODE);
-    ///////////
     return 0;
 }
 
@@ -182,16 +179,6 @@ static int sofs_open(const char *path, struct fuse_file_info *fi)
     inode_t *inode = inode_for_path(path);
     if (inode == NULL) /* if the file doesn't exist, create it */
     {
-        //int flh = zero_block[FREE_LIST_HEAD];
-        //int *block = read_block(flh);
-        //update_first_free(block[0]);
-        //free(block);
-        ///* create an inode */
-        //inode = malloc(nmemb * sizeof(int));
-        //memset(inode, -1, BLOCK_SIZE);
-        //inode[0] = MAGIC_INODE;
-        //strcpy((char *) inode + 1, path);
-        //write_block_to_disk(flh, inode);
         return -ENOENT;
     }
     fi -> fh = (uint64_t) inode;
@@ -256,6 +243,11 @@ static int sofs_read(const char *path, char *buf, size_t size, off_t offset, str
 static int sofs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
     printf("Called write\n");
+    inode_t *inode = (inode_t *) fi -> fh;
+    if (inode != NULL)
+    {
+        printf("Estamos no bom caminho\n");
+    }
     return 1;
 }
 

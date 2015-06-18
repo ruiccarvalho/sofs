@@ -119,31 +119,28 @@ static int *read_block(int block_index)
     return block;
 }
 
-static int *inode_for_path(const char *path)
+static inode_t *inode_for_path(const char *path)
 {
     int nmemb = BLOCK_SIZE / sizeof(int);
     int desc;
     int i;
+    inode_t *inode;
     for (i = 5; i < nmemb; i++)
     {
         desc = zero_block[i];
         if (desc != -1)
         {
-            inode_t *inode = (inode_t *) malloc(512);
-            // inode = (int *) read_block(desc);
-            fseek(disk, 512, SEEK_SET);
-            fread(inode, sizeof(int), 128, disk);
-            if (*((int *) inode) != MAGIC_INODE)
+            inode = (inode_t *) read_block(desc);
+            if (inode -> magic != MAGIC_INODE)
             {
-                printf("inode's magic not correct (it's %d, should be %d). inconsistent fs\n", *((int *) inode), MAGIC_INODE);
+                printf("inode's magic not correct. inconsistent fs\n");
                 exit(-1);
             }
             printf("inode's filename %s at desc %d\n", inode->filename, desc);
-            // if (!strcmp((char *) inode + 1, path))
-            // {
-            //     return inode;
-            // }
-            exit(0);
+            if (!strcmp(inode -> filename, path))
+            {
+                return inode;
+            }
             free(inode);
         }
     }
@@ -182,7 +179,7 @@ static int sofs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 static int sofs_open(const char *path, struct fuse_file_info *fi)
 {
     printf("Called open of path \"%s\" flags %d \n", path, fi->flags);
-    int *inode = inode_for_path(path);
+    inode_t *inode = inode_for_path(path);
     if (inode == NULL) /* if the file doesn't exist, create it */
     {
         //int flh = zero_block[FREE_LIST_HEAD];
@@ -222,11 +219,11 @@ static int sofs_getattr(const char *path, struct stat *stbuf)
     else
     {
         stbuf -> st_mode = S_IFREG | 0777;
-        int *inode = inode_for_path(path);
+        inode_t *inode = inode_for_path(path);
         if (inode != NULL)
         {
             printf("getattr found!\n");
-            stbuf -> st_size = inode[17];
+            stbuf -> st_size = inode -> size;
             stbuf -> st_nlink = 1;
             free(inode);
         }

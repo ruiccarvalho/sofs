@@ -33,23 +33,25 @@
 #define MAGIC_1_INDEX       0
 #define MAGIC_2_INDEX       1
 
-/* static char *disk_file_name; */
 static FILE *disk;
-static int fd_disk; /* the int file descriptor of the FILE *disk stream */
 static int zero_block[BLOCK_SIZE / sizeof(int)];
-static pthread_mutex_t lock;
 
-/*typedef struct fhandle {
-    int fd;
-    int *inode;
-} fhandle;*/
+typedef struct inode_t {
+    int     magic;
+    char    filename[64];
+    int     size;
+    int     fileblocks[110];
+} inode_t;
 
 static void print_zero_block()
 {
+    int buf_zero_block[128];
+    fseek(disk, 0, SEEK_SET);
+    fread(buf_zero_block, sizeof(int), 128, disk);
     int i;
     for (i = 0; i < 128; i++)
     {
-        printf("zero_block[%d] = %d\n", i, zero_block[i]);
+        printf("zero_block[%d] = %d\n", i, buf_zero_block[i]);
     }
 }
 
@@ -90,43 +92,27 @@ static int get_first_free_inode_index()
 static void new_inode_block_zero(int pos, int inode_desc)
 {
     zero_block[pos] = inode_desc;
-    pthread_mutex_lock(&lock);
-    lseek(fd_disk, (pos * sizeof(int)), SEEK_SET);
+    fseek(disk, (pos * sizeof(int)), SEEK_SET);
     fwrite(&inode_desc, sizeof(int), 1, disk);
-    pthread_mutex_unlock(&lock);
+    print_zero_block();
 }
 
 static void update_first_free(int free_head)
 {
-    printf("INSIDE update_first_free(%d)\n", free_head);
     zero_block[4] = free_head; /* zero_block[4] is free list head */
-    pthread_mutex_lock(&lock);
-    lseek(fd_disk, (4 * sizeof(int)), SEEK_SET); /* go to zero_block[4] on the (disk) file */
+    fseek(disk, (FREE_LIST_HEAD * sizeof(int)), SEEK_SET); /* go to zero_block[4] on the (disk) file */
     fwrite(&free_head, sizeof(int), 1, disk); /* write the new value, using a pointer to the argument as 'buffer' */
-    pthread_mutex_unlock(&lock);
-    print_zero_block();
+    //print_zero_block();
 }
-
-// static void write_block_to_disk(int i, int *block)
-// {
-//     printf("Entered write block to disk with i = %d\n", i);
-//     pthread_mutex_lock(&lock);(fd_disk, (i * BLOCK_SIZE), SEEK_SET);
-//     fwrite(block, sizeof(int), 128, disk);
-// }
 
 static int *read_block(int block_index)
 {
     int *block = (int *) malloc(BLOCK_SIZE); /* must be free'd somewhere by a caller */
-    printf("block_index * BLOCK_SIZE = %d\n", block_index * BLOCK_SIZE);
-    pthread_mutex_lock(&lock);
-    lseek(fd_disk, (block_index * BLOCK_SIZE), SEEK_SET);
-    size_t rd = fread(block, 4, 128, disk);
-    pthread_mutex_unlock(&lock);
-    printf("rd = %lu\n", rd);
-    printf("rd is such because of an error? %d\n", ferror(disk));
-    printf("rd is such because of EOF? %d\n", feof(disk));
+    fseek(disk, block_index * BLOCK_SIZE, SEEK_SET);
+    size_t rd = fread(block, sizeof(int), BLOCK_SIZE / sizeof(int), disk);
     if (rd != 128)
     {
+        printf("read_block error: Didn't read the whole block...\n");
         return NULL;
     }
     printf("Returning block!\n");
@@ -135,9 +121,7 @@ static int *read_block(int block_index)
 
 static int *inode_for_path(const char *path)
 {
-    printf("Hi from inode_for_path with path \"%s\"\n", path);
     int nmemb = BLOCK_SIZE / sizeof(int);
-    int *inode;
     int desc;
     int i;
     for (i = 5; i < nmemb; i++)
@@ -145,19 +129,21 @@ static int *inode_for_path(const char *path)
         desc = zero_block[i];
         if (desc != -1)
         {
-            printf("Desc = %d\n", desc);
-            inode = (int *) read_block(desc);
-            printf("inode != null? %d\n", inode != NULL);
-            if (inode[0] != MAGIC_INODE)
+            inode_t *inode = (inode_t *) malloc(512);
+            // inode = (int *) read_block(desc);
+            fseek(disk, 512, SEEK_SET);
+            fread(inode, sizeof(int), 128, disk);
+            if (*((int *) inode) != MAGIC_INODE)
             {
-                printf("inode's magic not correct (it's %d). inconsistent fs\n", inode[0]);
+                printf("inode's magic not correct (it's %d, should be %d). inconsistent fs\n", *((int *) inode), MAGIC_INODE);
                 exit(-1);
             }
-            if (!strcmp((char *) inode + 1, path))
-            {
-                printf("inode_for_path found filename %s at desc %d\n", (char *) inode + 1, desc);
-                return inode;
-            }
+            printf("inode's filename %s at desc %d\n", inode->filename, desc);
+            // if (!strcmp((char *) inode + 1, path))
+            // {
+            //     return inode;
+            // }
+            exit(0);
             free(inode);
         }
     }
@@ -166,29 +152,30 @@ static int *inode_for_path(const char *path)
 
 static int sofs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
-    printf("Entered create with path %s\n", path);
     int flh = zero_block[FREE_LIST_HEAD];
     int *block = read_block(flh);
     printf("free head's fst position has %d\n", block[0]);
     update_first_free(block[0]);
     free(block);
     /* create an inode */
-    int *inode = (int *) malloc(BLOCK_SIZE);
+    inode_t *inode = (inode_t *) malloc(sizeof(inode_t));
     memset(inode, -1, BLOCK_SIZE);
-    inode[0] = MAGIC_INODE;
-    printf("Will strcpy inode's filename, path w/ path = %s\n", path);
-    strcpy((char *) inode + 1, path);
-    printf("strcpyd inode's filename, path. inode->filename = %s\n", (char *) inode + 1);
-    //write_block_to_disk(flh, inode);
-    printf("flh = %d\n", flh);
-    pthread_mutex_lock(&lock);
-    lseek(fd_disk, 32, SEEK_SET);
-    fwrite(inode, sizeof(int), 128, disk);
-    pthread_mutex_unlock(&lock);
+    inode -> magic = MAGIC_INODE;
+    inode -> size = 0;
+    strcpy(inode -> filename, path);
+    fseek(disk, 512, SEEK_SET);
+    fwrite(inode, sizeof(int), BLOCK_SIZE / sizeof(int), disk);
     /* update zero_block */
     int pos = get_first_free_inode_index();
     new_inode_block_zero(pos, flh);
     fi -> fh = (uint64_t) inode;
+    
+    /////////
+    // int tempbuf[128];
+//     fseek(disk, 512, SEEK_SET);
+//     fread(tempbuf, 4, 128, disk);
+//     printf("magic checks? %d\n", tempbuf[0] == MAGIC_INODE);
+    ///////////
     return 0;
 }
 
@@ -285,7 +272,6 @@ static void *sofs_init(struct fuse_conn_info *conn)
 static void sofs_destroy(void *private_data)
 {
     fclose(disk);
-    pthread_mutex_destroy(&lock);
 }
 
 static struct fuse_operations sofs_oper = {
@@ -328,21 +314,15 @@ int main(int argc, char *argv[])
 
 	disk = fopen(disk_file_name, MODE);
     
-    if (pthread_mutex_init(&lock, NULL) != 0)
-    {
-        printf("mutex init failed\n");
-        return 1;
-    }
-    
     if (fsck()) /* inconsistent file system */
     {
         printf("Error: inconsistent file system\n");
         return -1;
     }
     
-    print_zero_block();
+    printf("Welcome. Mounting. Oh, btw, sizeof(inode_t) = %lu\n", sizeof(inode_t));
     
-    printf("Welcome. Mounting. Oh, btw, sizeof(int) = %lu\n", sizeof(int));
+    print_zero_block();
 
 	return fuse_main(fuse_main_argc, fuse_main_argv, &sofs_oper, NULL);
 }

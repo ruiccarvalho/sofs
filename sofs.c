@@ -128,7 +128,6 @@ static void update_first_free(int free_head)
     zero_block[4] = free_head; /* zero_block[4] is free list head */
     fseek(disk, (FREE_LIST_HEAD * sizeof(int)), SEEK_SET); /* go to zero_block[4] on the (disk) file */
     fwrite(&free_head, sizeof(int), 1, disk); /* write the new value, using a pointer to the argument as 'buffer' */
-    //print_zero_block();
 }
 
 static int get_and_update_first_free()
@@ -141,35 +140,6 @@ static int get_and_update_first_free()
     fseek(disk, (FREE_LIST_HEAD * sizeof(int)), SEEK_SET);
     fwrite(&next, sizeof(int), 1, disk);
     return res;
-}
-
-static inode_t *inode_for_path(const char *path)
-{
-    int nmemb = BLOCK_SIZE / sizeof(int);
-    int desc;
-    int i;
-    inode_t *inode;
-    for (i = 5; i < nmemb; i++)
-    {
-        desc = zero_block[i];
-        if (desc != -1)
-        {
-            inode = (inode_t *) read_block(desc);
-            if (inode -> magic != MAGIC_INODE)
-            {
-                printf("inode's magic not correct. inconsistent fs\n");
-                exit(-1);
-            }
-            printf("inode's filename %s at desc %d\n", inode -> filename, desc);
-            if (!strcmp(inode -> filename, path))
-            {
-                printf("Returning inode at inode_for_path\n");
-                return inode;
-            }
-            free(inode);
-        }
-    }
-    return NULL; /* return value for nonexistent file */
 }
 
 static handle_t *handle_for_path(const char *path)
@@ -263,17 +233,19 @@ static int sofs_getattr(const char *path, struct stat *stbuf)
     else
     {
         stbuf -> st_mode = S_IFREG | 0777;
-        inode_t *inode = inode_for_path(path);
-        if (inode != NULL)
+        handle_t *handle = handle_for_path(path);
+        if (handle != NULL)
         {
-            printf("getattr found!\n");
+            inode_t *inode = handle -> inode;
+            /* printf("getattr found!\n"); */
             stbuf -> st_size = inode -> size;
             stbuf -> st_nlink = 1;
             free(inode);
+            free(handle);
         }
         else
         {
-            printf("getattr not found!\n");
+            /* printf("getattr not found!\n"); */
             res = -ENOENT;
         }
     }
@@ -283,37 +255,101 @@ static int sofs_getattr(const char *path, struct stat *stbuf)
 	return res;
 }
 
+static int sofs_truncate(const char* path, off_t size)
+{
+    printf("Called truncate\n");
+    /* TODO stub */
+    return 0;
+}
+
 static int sofs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi)
 {
     printf("Called readdir\n");
-	/* TODO stub */
+    /* TODO stub */
     return 0;
 }
 
 static int sofs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
     printf("Called read with size = %zu and offset = %lld\n", size, offset);
-    char *rd = (char *) read_block(2);
-    memcpy(buf, rd, size);
-    printf("at sofs_read, content of buffer: %s\n", buf);
-    free(rd);
-    return size;
-}
-
-static int sofs_truncate(const char* path, off_t size)
-{
-    /* TODO stub */
-    return 0;
-}
-
-static int sofs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
-{
-    printf("Called write\n");
     handle_t *handle = (handle_t *) fi -> fh;
     int block_i = offset / BLOCK_SIZE;
     int offset_in_block = offset - block_i * BLOCK_SIZE;
     int *fileblocks = (handle -> inode) -> fileblocks;
     char *block_buffer;
+    int many_blocks = (size + offset) / BLOCK_SIZE + ((size + offset) % BLOCK_SIZE ? 1 : 0);
+    int disk_block;
+    int i;
+    for (i = 0; i < many_blocks; i++)
+    {
+        disk_block = fileblocks[18 + block_i + i];
+        if (disk_block != -1)
+        {
+            block_buffer = (char *) read_block(disk_block);
+        }
+        else
+        {
+            block_buffer = malloc(BLOCK_SIZE);
+            memset(block_buffer, 0, BLOCK_SIZE);
+        }
+        memcpy(
+            buf + (i ? ((i - 1) * BLOCK_SIZE + offset_in_block) : 0),
+            block_buffer + (i ? 0 : offset_in_block),
+            BLOCK_SIZE - (i ? (size - (i - 1) * BLOCK_SIZE - offset_in_block >= BLOCK_SIZE ? 0 : BLOCK_SIZE - size - (i - 1) * BLOCK_SIZE - offset_in_block) : offset_in_block)
+                );
+        free(block_buffer);
+    }
+    /*
+    int disk_block = fileblocks[18 + block_i];
+    if (disk_block != -1)
+    {
+        block_buffer = (char *) read_block(disk_block);
+    }
+    else
+    {
+        block_buffer = malloc(BLOCK_SIZE);
+        memset(block_buffer, 0, BLOCK_SIZE);
+    }
+    memcpy(buf, block_buffer + offset_in_block, size);
+    free(block_buffer);
+    */
+    return size;
+}
+
+static int sofs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
+{
+    printf("Called write with size %zu and offset %lld\n", size, offset);
+    handle_t *handle = (handle_t *) fi -> fh;
+    int block_i = offset / BLOCK_SIZE;
+    int offset_in_block = offset - block_i * BLOCK_SIZE;
+    int *fileblocks = (handle -> inode) -> fileblocks;
+    char *block_buffer;
+    int many_blocks = (size + offset) / BLOCK_SIZE + ((size + offset) % BLOCK_SIZE ? 1 : 0);
+    int disk_block;
+    int i;
+    for (i = 0; i < many_blocks; i++)
+    {
+        disk_block = fileblocks[18 + block_i + i];
+        if (disk_block != -1)
+        {
+            block_buffer = (char *) read_block(disk_block);
+        }
+        else
+        {
+            disk_block = get_and_update_first_free();
+            fileblocks[18 + block_i + i] = disk_block;
+            block_buffer = malloc(BLOCK_SIZE);
+            memset(block_buffer, 0, BLOCK_SIZE);
+        }
+        memcpy(
+            block_buffer + (i ? 0 : offset_in_block),
+            buf + i * BLOCK_SIZE,
+            BLOCK_SIZE - (i ? (size - (i - 1) * BLOCK_SIZE - offset_in_block >= BLOCK_SIZE ? 0 : BLOCK_SIZE - size - (i - 1) * BLOCK_SIZE - offset_in_block) : offset_in_block)
+                );
+        write_block(disk_block, (int *) block_buffer);
+        free(block_buffer);
+    }
+    /*
     int disk_block = fileblocks[18 + block_i];
     if (disk_block != -1)
     {
@@ -322,14 +358,20 @@ static int sofs_write(const char *path, const char *buf, size_t size, off_t offs
     else
     {
         disk_block = get_and_update_first_free();
+        fileblocks[18 + block_i] = disk_block;
         block_buffer = malloc(BLOCK_SIZE);
         memset(block_buffer, 0, BLOCK_SIZE);
     }
     memcpy(block_buffer + offset_in_block, buf, size);
-    printf("WILL WRITE IN BLOCK %d\n", disk_block);
     write_block(disk_block, (int *) block_buffer);
     free(block_buffer);
-    (handle -> inode) -> size = size;
+    */
+    int file_size = (handle -> inode) -> size;
+    if (offset + size > file_size)
+    {
+        file_size = offset + size;
+    }
+    (handle -> inode) -> size = file_size;
     write_block(handle -> inode_index, (int *) handle -> inode);
     return size;
 }
